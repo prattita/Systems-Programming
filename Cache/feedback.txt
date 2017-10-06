@@ -1,0 +1,415 @@
+
+CS:APP Cache Lab: Grading Sheet for prattita.tar
+
+Part 1: Compiling test framework
+
+gcc -g -Wall -Werror -std=c99 -m64 -o csim csim.c cachelab.c -lm 
+gcc -g -Wall -Werror -std=c99 -m64 -o csim-ref csim-ref.c cachelab.c -lm
+gcc -g -Wall -Werror -std=c99 -m64 -o test-csim test-csim.c 
+gcc -g -Wall -Werror -std=c99 -m64 -O0 -c trans.c
+gcc -g -Wall -Werror -std=c99 -m64 -o test-trans test-trans.c cachelab.c trans.o 
+gcc -g -Wall -Werror -std=c99 -m64 -O0 -o tracegen tracegen.c trans.o cachelab.c
+
+
+Part 2: Running the driver
+
+Part A: Testing cache simulator
+Running ./test-csim
+                        Your simulator     Reference simulator
+Points (s,E,b)    Hits  Misses  Evicts    Hits  Misses  Evicts
+     3 (1,1,1)       9       8       6       9       8       6  traces/yi2.trace
+     3 (4,2,4)       4       5       2       4       5       2  traces/yi.trace
+     3 (2,1,4)       2       3       1       2       3       1  traces/dave.trace
+     3 (2,1,3)     167      71      67     167      71      67  traces/trans.trace
+     3 (2,2,3)     201      37      29     201      37      29  traces/trans.trace
+     3 (2,4,3)     212      26      10     212      26      10  traces/trans.trace
+     3 (5,1,5)     231       7       0     231       7       0  traces/trans.trace
+     6 (5,1,5)  265189   21775   21743  265189   21775   21743  traces/long.trace
+    27
+
+
+Part B: Testing transpose function
+Running ./test-trans -M 32 -N 32
+Running ./test-trans -M 64 -N 64
+Running ./test-trans -M 61 -N 67
+
+Cache Lab summary:
+                        Points   Max pts      Misses
+Csim correctness          27.0        27
+Trans perf 32x32           6.9         8         343
+Trans perf 64x64           1.2         8        1891
+Trans perf 61x67          10.0        10        1816
+          Total points    45.1        53
+
+AUTORESULT_STRING=45.1:343:1891:1816
+
+
+Part 3: Grade
+
+
+Score : 45.1 / 53
+
+Part 4: Handin files for prattita.tar
+
+
+*** csim.c ***
+#include "cachelab.h"
+#include <getopt.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+
+#define MAXLEN 80
+
+typedef struct{
+  int countLRU;
+  int valid;
+  unsigned int tag;
+  int index;
+  int offset;
+}line;
+
+/*functions*/
+void help(); /*Prints helper function*/
+void readfile(char *argFile); /*Function to read file*/ 
+void create_cache();
+void free_cache();
+void eval(char *trace, unsigned long address, int size); /*Evaluates each line in the file*/
+int evict(int index);
+
+
+/*Global var*/
+int hit, miss, eviction;
+int s = 0;
+int E = 0;
+int b = 0;
+int nextLRU = 0;
+line** cache;
+
+int main(int argc, char **argv)
+{
+  int v = 0;/*Verbose flag*/
+  char *argFile = NULL;
+  int c;
+  //  printf("HereB4GEOPT\n");
+  while ((c= getopt(argc, argv, "hvs:E:b:t:")) != EOF){
+    switch(c){
+    case 'h':
+      help();
+      break;
+    case 'v':
+      v = 1; /*-v was called it will be executed in the end*/
+      break;
+    case 's':
+      s = atoi(optarg);
+      break;
+    case 'E':
+      E = atoi(optarg);
+      break;
+    case 'b':
+      b = atoi(optarg);
+      break;
+    case 't':
+      argFile = (char*)optarg;
+      break;
+    }
+  }
+  if (s==0 || E==0 || b==0 || !argFile){
+    printf("./csim: Missing required command line argument\n");
+    help();
+  }
+  //printf("After s,E,b have values, before cache creation\n");
+  create_cache();
+  //  printf("Cache created, b4 file has been read s= %d\n",s);
+  readfile(argFile);
+  // printf("File read\n");
+  printSummary(hit, miss, eviction);
+  free_cache();
+  return 0;
+}
+
+void create_cache(){
+  int S = 1<<s; /*2^s*/
+  cache = malloc(S * sizeof(line*));
+  for (int i = 0; i<S; i++){
+    cache[i] = malloc(E * sizeof(line)); /*Alocating space for the numbers of lines per set i*/
+    for (int j = 0; j<E; j++){
+      cache[i][j].valid = 0;
+    }
+  }
+  return;
+}
+
+void free_cache(){
+  int S = 1<<s;
+  for (int i = 0; i<S; i++){
+    free(cache[i]);
+  }
+  free(cache);
+  return;
+}
+void readfile(char *argFile){
+  FILE *file;
+  char trace[10];
+  unsigned long address;
+  // unsigned long tag;
+  //  int offset, index;
+  char comma;
+  int size; 
+  if ((file = fopen(argFile, "r")) == NULL) {
+    printf("%s No such file",argFile);
+  }
+  while (fscanf(file, "%s %lx %c %d", trace, &address, &comma, &size) != EOF ){
+    eval(trace, address, size);
+    printf("%d\n",nextLRU);
+  }
+  fclose(file);
+}
+
+void eval(char *trace, unsigned long address, int size){
+  int offset;
+  int index;
+  int i;
+  int minLRU;
+  unsigned long tag;
+  unsigned long masks = (1<<s)-1;
+  unsigned long maskb = (1<<b)-1;
+  offset = address & maskb;
+  index = (address>>(b)) & masks;
+  tag = address>>(s+b);
+  /*  printf("tag %ld index %d offset%d\n",tag, index, offset);*/
+  /*Load - Store - for the purposes of thos lab they work the same,
+   Load: Look for the tag and validness of the given id, if found hit, else miss. If we miss, go and retireve it from memory and store it in the cache, if cache is full evict the LRU.
+  Store: Look for the tag and validness of the given id, if found hit, else miss. If we miss, go and store the data in the first open cache, if cahce full evict the LRU*/
+  if (!strcmp(trace,"L")||(!strcmp(trace,"S"))){
+    for (i = 0; i<E; i++){/*Check if it's on the cache*/
+      if ((cache[index][i].valid==1) && (cache[index][i].tag==tag)){
+	hit++;
+	cache[index][i].countLRU = nextLRU;
+	nextLRU++;
+	return;
+      }
+    }
+    /*If we are here, then it is not in the cache, and we need to 'get it from memory' and put it in the cache*/
+    miss++;
+    for (i = 0; i<E; i++){
+      if (cache[index][i].valid==0){ /*Checks if there are any empty spots, before performing any eviction*/
+	cache[index][i].valid = 1;
+	cache[index][i].tag = tag;
+	cache[index][i].countLRU = nextLRU;
+	nextLRU++;
+	return;
+      }
+    }
+    /*If all of the cache slots are full, we need to evict something. I am using the function evict, which returns the index of the 'Least recently used' cache slot in the set.*/
+    minLRU = evict(index);
+    cache[index][minLRU].countLRU = nextLRU;
+    cache[index][minLRU].tag = tag;
+    nextLRU++;
+    eviction++;
+  }
+  else if (!strcmp(trace,"M")){
+    /*Look if the tag exists for the given id, if it does hit = Load it*/
+    int loaded = 0;/*If it loaded, then we skip both miss and eviction*/
+    int inCache = 0;/*If it is not loaded, we check whether we can insert the element without an eviction*/
+    for (i = 0; i<E; i++){
+      if ((cache[index][i].valid==1)&&(cache[index][i].tag==tag)){
+	hit++;
+	cache[index][i].countLRU = nextLRU;
+	nextLRU++;
+	loaded = 1;
+	inCache = 1;
+      }
+    }
+    /*If value was not there, try to put it into an empty slot in the cache*/
+    if(!loaded){
+	miss++;  
+	for (i=0; i<E; i++){
+	  if (cache[index][i].valid == 0){
+	    cache[index][i].tag = tag;
+	    cache[index][i].valid = 1;
+	    cache[index][i].countLRU = nextLRU;
+	    nextLRU++;
+	    inCache = 1;
+	  }
+	}
+    }
+    /*No empty slots, so we evict the LRU item*/
+    if (!inCache){
+      minLRU = evict(index);
+      cache[index][minLRU].countLRU = nextLRU;
+      cache[index][minLRU].tag = tag;
+      nextLRU++;
+      eviction++;
+    }
+  
+    /*Once the element has been evicted, we store it*/
+    for (i=0;i<E;i++){
+      if ((cache[index][i].valid==1)&&(cache[index][i].tag==tag)){
+	hit++;
+	cache[index][i].countLRU = nextLRU;
+	nextLRU++;
+	return;
+      }
+    }
+  }
+}
+
+int evict(int index){
+  int minLRU = 0;
+  for (int i=0; i<E; i++){
+    if (cache[index][minLRU].countLRU > cache[index][i].countLRU){
+      minLRU = i;
+    }
+  }
+  return minLRU;
+}
+
+void help(){
+  printf("Usage: ./csim-ref [-hv] -s <num> -E <num> -b <num> -t <file>\n");
+  printf("Options:\n");
+  printf("  -h         Print this help message.\n");
+  printf("  -v         Optional verbose flag\n");
+  printf("  -s <num>   Number of set index bits.\n");
+  printf("  -E <num>   Number of lines per set.\n");
+  printf("  -b <num>   Number of block offset bits.\n");
+  printf("  -t <file>  Trace file.\n\n");
+  printf("Examples:\n");
+  printf("  linux>  ./csim -s 4 -E 1 -b 4 -t traces/yi.trace\n");
+  printf("  linux>  ./csim -v -s 8 -E 2 -b 4 -t traces/yi.trace\n");
+  exit(0);
+  return;
+}
+
+*** trans.c ***
+/* 
+ * trans.c - Matrix transpose B = A^T
+ *
+ * Each transpose function must have a prototype of the form:
+ * void trans(int M, int N, int A[N][M], int B[M][N]);
+ *
+ * A transpose function is evaluated by counting the number of misses
+ * on a 1KB direct mapped cache with a block size of 32 bytes.
+ */ 
+#include <stdio.h>
+#include "cachelab.h"
+
+int is_transpose(int M, int N, int A[N][M], int B[M][N]);
+
+/* 
+ * transpose_submit - This is the solution transpose function that you
+ *     will be graded on for Part B of the assignment. Do not change
+ *     the description string "Transpose submission", as the driver
+ *     searches for that string to identify the transpose function to
+ *     be graded. 
+ */
+char transpose_submit_desc[] = "Transpose submission";
+void transpose_submit(int M, int N, int A[N][M], int B[M][N]){
+  int i,j,tmp, bsize, bi, bj, bbsize, bbi, bbj;
+  if (M==32 && N==32){
+    bsize = 8;
+    //    bbsize = 8;
+    for (i=0; i<M; i+=bsize){
+      for (j=0; j<N; j+=bsize){
+	for (bj=j;bj< j + bsize;bj++){
+	  for (bi=i;bi< i + bsize;bi++){
+	    tmp = A[bi][bj];
+	    B[bj][bi] = tmp;
+	  }
+	}
+      }
+    }
+  }
+  else if (M==64 && N==64){
+    bsize = 8;
+    bbsize = 4;
+    for (i=0; i<M; i+=bsize){
+      for (j=0; j<N; j+=bsize){
+	for (bj=j;bj< j + bsize;bj+=bbsize){
+	  for (bi=i;bi< i + bsize;bi+=bbsize){
+	    for (bbj=bj; bbj < bj + bbsize; bbj++){
+	      for (bbi=bi; bbi < bi + bbsize; bbi++){
+		tmp = A[bbi][bbj];
+		B[bbj][bbi] = tmp;
+	      }
+	    }
+	  }
+	}
+      }
+    }
+  }
+
+  else{
+    bsize = 16;
+    for (i = 0; i<M; i+=bsize){
+      for (j = 0; j<N; j+=bsize){
+	for (bj=j; bj< j + bsize;bj++){
+	  for (bi=i; bi< i + bsize;bi++){
+	    if (!(bi >= M||bj >= N)){
+	      tmp = A[bj][bi];
+	      B[bi][bj] = tmp;
+	    }
+	  }
+	}
+      }
+    }
+  }
+}
+
+/* 
+ * You can define additional transpose functions below. We've defined
+ * a simple one below to help you get started. 
+ */ 
+
+/* 
+ * trans - A simple baseline transpose function, not optimized for the cache.
+ */
+char trans_desc[] = "Simple row-wise scan transpose";
+void trans(int M, int N, int A[N][M], int B[M][N])
+{
+  int i, j, tmp;
+  for (i = 0; i < N; i++) {
+    for (j = 0; j < M; j++) {
+      tmp = A[i][j];
+      B[j][i] = tmp;
+    }
+  }    
+}
+
+/*
+ * registerFunctions - This function registers your transpose
+ *     functions with the driver.  At runtime, the driver will
+ *     evaluate each of the registered functions and summarize their
+ *     performance. This is a handy way to experiment with different
+ *     transpose strategies.
+ */
+void registerFunctions()
+{
+    /* Register your solution function */
+    registerTransFunction(transpose_submit, transpose_submit_desc); 
+
+    /* Register any additional transpose functions */
+    registerTransFunction(trans, trans_desc); 
+
+}
+
+/* 
+ * is_transpose - This helper function checks if B is the transpose of
+ *     A. You can check the correctness of your transpose by calling
+ *     it before returning from the transpose function.
+ */
+int is_transpose(int M, int N, int A[N][M], int B[M][N])
+{
+    int i, j;
+
+    for (i = 0; i < N; i++) {
+        for (j = 0; j < M; ++j) {
+            if (A[i][j] != B[j][i]) {
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
